@@ -9,6 +9,7 @@ import process from 'node:process';
 const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent';
 const OPENAI_DEFAULT_API_BASE = 'https://api.openai.com/v1';
 const OPENAI_DEFAULT_MODEL = 'gpt-4o-mini';
+const DEEPSEEK_DEFAULT_MODEL = 'deepseek-flash';
 const FEED_FETCH_TIMEOUT_MS = 15_000;
 const FEED_CONCURRENCY = 10;
 const GEMINI_BATCH_SIZE = 10;
@@ -208,6 +209,15 @@ interface GeminiSummaryResult {
 
 interface AIClient {
   call(prompt: string): Promise<string>;
+}
+
+interface DeepSeekSearchResult {
+  title?: string;
+  url?: string;
+  summary?: string;
+  content?: string;
+  date?: string | null;
+  rerank_score?: number;
 }
 
 interface TrendingRepo {
@@ -754,8 +764,66 @@ async function callOpenAICompatible(
 
 function inferOpenAIModel(apiBase: string): string {
   const base = apiBase.toLowerCase();
-  if (base.includes('deepseek')) return 'deepseek-chat';
+  if (base.includes('deepseek')) return DEEPSEEK_DEFAULT_MODEL;
   return OPENAI_DEFAULT_MODEL;
+}
+
+async function searchDeepSeek(query: string, apiKey: string): Promise<DeepSeekSearchResult[]> {
+  const response = await fetch('https://api.deepseek.com/v1/tools/search', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({ query: query.slice(0, 128), count: 3, need_content: true }),
+    signal: AbortSignal.timeout(FEED_FETCH_TIMEOUT_MS),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => 'Unknown error');
+    throw new Error(`DeepSeek Search API error (${response.status}): ${errorText}`);
+  }
+
+  const data = await response.json() as { results?: DeepSeekSearchResult[] };
+  return Array.isArray(data.results) ? data.results : [];
+}
+
+async function enrichArticlesWithSearch<T extends Article>(articles: T[], apiKey: string): Promise<T[]> {
+  const enriched: T[] = [];
+  let searched = 0;
+
+  for (let i = 0; i < articles.length; i += 3) {
+    const batch = articles.slice(i, i + 3);
+    const results = await Promise.all(batch.map(async article => {
+      try {
+        const matches = await searchDeepSeek(`${article.title} ${article.sourceName}`, apiKey);
+        const useful = matches
+          .filter(result => (result.rerank_score ?? 0) >= 1.5)
+          .slice(0, 2)
+          .map(result => [
+            result.title ? `标题：${result.title}` : '',
+            result.url ? `链接：${result.url}` : '',
+            result.date ? `日期：${result.date}` : '',
+            result.content || result.summary || '',
+          ].filter(Boolean).join('\n').slice(0, 2500))
+          .filter(Boolean);
+
+        searched++;
+        if (useful.length === 0) return article;
+        return {
+          ...article,
+          description: `${article.description}\n\n[DeepSeek 网页搜索补充材料]\n${useful.join('\n\n---\n\n')}`,
+        };
+      } catch (error) {
+        console.warn(`[digest] DeepSeek Search failed for "${article.title.slice(0, 60)}": ${error instanceof Error ? error.message : String(error)}`);
+        return article;
+      }
+    }));
+    enriched.push(...results);
+  }
+
+  console.log(`[digest] DeepSeek Search: enriched ${enriched.filter((a, i) => a.description !== articles[i]?.description).length}/${articles.length} selected articles (${searched} requests)`);
+  return enriched;
 }
 
 function createAIClient(config: {
@@ -1389,7 +1457,7 @@ Environment:
   GEMINI_API_KEY   Optional but recommended. Get one at https://aistudio.google.com/apikey
   OPENAI_API_KEY   Optional fallback key for OpenAI-compatible APIs
   OPENAI_API_BASE  Optional fallback base URL (default: https://api.openai.com/v1)
-  OPENAI_MODEL     Optional fallback model (default: deepseek-chat for DeepSeek base, else gpt-4o-mini)
+  OPENAI_MODEL     Optional model override (default: deepseek-flash for DeepSeek base, else gpt-4o-mini)
   RSSHUB_BASE_URL  RSSHub instance URL for X/Twitter feeds (default: https://rsshub.app)
   X_ACCOUNTS       Comma-separated X/Twitter accounts to follow (e.g. karpathy,sama,ylecun)
 
@@ -1506,7 +1574,11 @@ async function main(): Promise<void> {
   console.log(`[digest] Top ${topN} articles selected (score range: ${topArticles[topArticles.length - 1]?.totalScore || 0} - ${topArticles[0]?.totalScore || 0})`);
   
   console.log(`[digest] Step 4/5: Generating AI summaries...`);
-  const indexedTopArticles = topArticles.map((a, i) => ({ ...a, index: i }));
+  const searchEnabled = Boolean(openaiApiKey && (openaiApiBase || '').toLowerCase().includes('deepseek'));
+  const summaryArticles = searchEnabled
+    ? await enrichArticlesWithSearch(topArticles, openaiApiKey!)
+    : topArticles;
+  const indexedTopArticles = summaryArticles.map((a, i) => ({ ...a, index: i }));
   const summaries = await summarizeArticles(indexedTopArticles, aiClient, lang);
   
   const finalArticles: ScoredArticle[] = topArticles.map((a, i) => {

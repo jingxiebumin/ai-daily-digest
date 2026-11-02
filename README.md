@@ -1,13 +1,13 @@
 # AI Daily Digest
 
-每天自动从 **104 个技术博客**、**30 个 X/Twitter 账号**、**Hacker News**、**7 个 Reddit 子版块**、**Product Hunt**、**Lobste.rs** 抓取最新内容，融合 **ClawFeed 日报** 和 **GitHub Trending** 热门项目，通过 **Gemini AI** 智能评分、分类和摘要，生成结构化的中文每日技术精选日报，并自动推送到微信。
+每天自动从 **技术博客**、**X/Twitter**、**Hacker News**、**Reddit**、**Product Hunt**、**Lobste.rs** 抓取最新内容，融合 **ClawFeed 日报** 和 **GitHub Trending** 热门项目，通过 **DeepSeek AI** 智能评分、分类和摘要，并用网页搜索补充精选文章上下文，生成结构化的中文每日技术精选日报并自动推送到微信。
 
 ## 它能做什么
 
 - **多源聚合** — 订阅 114 个 RSS 源（技术博客 + HN + Reddit + Product Hunt + Lobste.rs）加上 30 个 X/Twitter 技术账号
 - **ClawFeed 日报** — 聚合 AI 驱动的多源新闻日报，包含头条、精选 Top 10、推荐关注
 - **GitHub Trending** — 每日热门开源项目（全语言 + Python），AI 相关项目自动标记
-- **AI 智能评分** — 使用 Gemini AI 从相关性、质量、时效性三个维度（各 1-10 分）对每篇文章打分
+- **AI 智能评分** — 使用 DeepSeek 从相关性、质量、时效性三个维度（各 1-10 分）对每篇文章打分
 - **自动分类** — 将文章归入 AI/ML、安全、工程、工具/开源、观点/讨论、其他 六大分类
 - **中文摘要** — 为每篇英文文章生成中文标题、4-6 句摘要和推荐理由
 - **趋势洞察** — AI 生成当日宏观技术趋势总结
@@ -29,7 +29,7 @@ GitHub Trending        ──┘                                                
 
 1. **并行抓取** — 三路并行：RSS/X 源获取文章、ClawFeed API 获取日报、GitHub Trending 页面解析
 2. **过滤** — 筛选最近 24 小时内发布的文章（RSS 部分）
-3. **评分** — Gemini AI 分批评估（10 篇/批），三维度打分 + 自动分类 + 关键词提取
+3. **评分** — DeepSeek 分批评估（10 篇/批），三维度打分 + 自动分类 + 关键词提取
 4. **精选** — 按总分排序，选取 Top 15
 5. **摘要** — 为精选文章生成中文标题、摘要和推荐理由，并生成当日趋势分析
 6. **输出** — 渲染为结构化 Markdown 日报，保存到 `digests/` 目录
@@ -121,8 +121,8 @@ simonwillison.net · jeffgeerling.com · seangoedecke.com · krebsonsecurity.com
 |------|------|
 | 运行时 | [Bun](https://bun.sh/) |
 | 语言 | TypeScript（单文件，零 npm 依赖） |
-| AI 评分 | Google Gemini 2.0 Flash |
-| AI 备选 | DeepSeek（OpenAI 兼容接口） |
+| AI 评分、摘要与趋势 | DeepSeek-V4.1-Flash-1017（API 模型 ID：`deepseek-flash`） |
+| 网页搜索 | DeepSeek Search API，为精选文章补充网页正文与摘要 |
 | X/Twitter 代理 | [RSSHub](https://docs.rsshub.app/)（Docker） |
 | 自动化 | GitHub Actions |
 | 微信推送 | [Server酱](https://sct.ftqq.com/) |
@@ -135,8 +135,11 @@ simonwillison.net · jeffgeerling.com · seangoedecke.com · krebsonsecurity.com
 # 安装 Bun（如未安装）
 curl -fsSL https://bun.sh/install | bash
 
-# 运行
-GEMINI_API_KEY=your-key bun scripts/digest.ts \
+# 使用 DeepSeek 运行（模型由 DeepSeek API 的 deepseek-flash ID 提供）
+OPENAI_API_KEY=your-key \
+OPENAI_API_BASE=https://api.deepseek.com/v1 \
+OPENAI_MODEL=deepseek-flash \
+  bun scripts/digest.ts \
   --hours 24 \
   --top-n 15 \
   --lang zh \
@@ -160,13 +163,13 @@ Fork 本仓库后，在 **Settings → Secrets and variables → Actions** 中�
 
 | Secret | 说明 |
 |--------|------|
-| `GEMINI_API_KEY` | Gemini API Key（[免费获取](https://aistudio.google.com/apikey)） |
+| `DEEPSEEK_API_KEY` | DeepSeek API Key，用于模型调用和网页搜索 |
 
 **Secrets（可选）：**
 
 | Secret | 说明 |
 |--------|------|
-| `DEEPSEEK_API_KEY` | DeepSeek API Key，作为 Gemini 的备用方案 |
+| `GEMINI_API_KEY` | 可选；配置后 Gemini 优先，DeepSeek 作为备用 |
 | `X_AUTH_TOKEN` | X/Twitter 认证 Token，用于抓取 X 动态 |
 | `X_CT0` | X/Twitter CSRF Token |
 | `SERVERCHAN_KEY` | Server酱 Key，用于微信推送 |
@@ -178,6 +181,8 @@ Fork 本仓库后，在 **Settings → Secrets and variables → Actions** 中�
 | `X_ACCOUNTS` | 要关注的 X 账号列表（逗号分隔） |
 
 配置完成后，GitHub Actions 会在每天**北京时间 7:39** 自动运行，也可在 Actions 页面手动触发。
+
+DeepSeek Search 会对精选文章逐篇搜索，每篇最多返回 3 条结果，并将高相关材料交给摘要模型。Search API 按成功请求次数计费（当前文档价格为每 1,000 次成功请求 5 元）；15 篇精选的单次日报最多产生 15 次 Search 请求。Search 失败时日报仍使用 RSS 原始内容继续生成。工作流使用 `deepseek-flash` 作为 API 模型 ID，该 ID 当前由 DeepSeek-V4.1-Flash-1017 提供服务。
 
 ## 日报存放
 
